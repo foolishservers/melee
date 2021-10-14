@@ -4,7 +4,7 @@
 #include <tf2>
 #include <tf2_stocks>
 
-#define PLUGIN_VERSION "0.7"
+#define PLUGIN_VERSION "0.7.1"
 
 #define ITEM_SPYCICLE 649
 
@@ -16,15 +16,13 @@ new bool:g_bJumper;
 new bool:g_bCircuit;
 new bool:g_bJetpack;
 
+new Handle:g_hCvarEnabled;
 new Handle:g_hCvarMeleeMode;
 new Handle:g_hCvarHealing;
 new Handle:g_hCvarFlags;
 new Handle:g_hCvarFlagsVoting;
-new Handle:g_hCvarDisabled;
-new Handle:g_hCvarArena;
 new Handle:g_hCvarJumper;
 new Handle:g_hCvarCircuit;
-new Handle:g_hCvarHint;
 new Handle:g_hCvarJetpack;
 
 new Handle:g_hSDKWeaponSwitch;
@@ -38,7 +36,6 @@ new g_iOffsetState;
 new g_iOffsetMelt;
 
 new bool:g_bVoting;
-new g_iVoteResults[2];
 
 new String:g_strOn[15];
 new String:g_strOff[15];
@@ -103,24 +100,24 @@ public OnPluginStart()
 	CloseHandle(hConf);
 	
 	CreateConVar("melee_version", PLUGIN_VERSION, "Plugin Version", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY);
+	g_hCvarEnabled = CreateConVar("melee_enabled", "0", "Enable Melee?");
 	g_hCvarHealing = CreateConVar("melee_healing", "0", "1 - Allow healing | 0 - Disallow healing");
 	g_hCvarFlags = CreateConVar("melee_flag", "z", "Admin flag for melee only");
 	g_hCvarFlagsVoting = CreateConVar("melee_voteflag", "z", "Admin flag fo melee votes");
-	g_hCvarDisabled = CreateConVar("melee_disabled", "0", "0 - No effect | 1 - Disable melee from being turned on");
-	g_hCvarArena = CreateConVar("melee_arena", "0.0", "Random chance for an arena melee round. Set between 0 and 1. Ex. 0 - Off, 0.25 - 25%", 0, true, 0.0, true, 1.0);
 	g_hCvarMeleeMode = CreateConVar("melee_mode", "0", "0 - Allow non-combat weapons | 1 - Only allow weapon in melee slot");
 	g_hCvarJumper = CreateConVar("melee_jumper", "0", "1 - Allow sticky/rocket jumper | 0 - Disallow these weapons");
 	g_hCvarCircuit = CreateConVar("melee_circuit", "0", "1 - Allow short circuit | 0 - Disallow short circuit");
 	g_hCvarJetpack = CreateConVar("melee_jetpack", "0", "1 - Allow thermal thruster | 0 - Disallow");
 	
-	g_hCvarHint = FindConVar("sm_vote_progress_hintbox");
-	
 	RegConsoleCmd("melee", Command_Melee);
-	RegConsoleCmd("votemelee", Command_VoteMelee);
 	
-	HookEvent("arena_round_start", Event_ArenaRoundStart);
-	HookEvent("arena_win_panel", Event_ArenaRoundEnd);
+	HookEvent("teamplay_round_start", Event_RoundStart);
+	HookEvent("arena_round_start", Event_RoundStart);
+	HookEvent("teamplay_round_win", Event_RoundEnd);
+	HookEvent("teamplay_round_stalemate", Event_RoundEnd);
+	HookEvent("arena_win_panel", Event_RoundEnd);
 	
+	HookConVarChange(g_hCvarEnabled, ConVarChange_Enabled);
 	HookConVarChange(g_hCvarHealing, ConVarChange_Healing);
 	HookConVarChange(g_hCvarMeleeMode, ConVarChange_Mode);
 	HookConVarChange(g_hCvarJumper, ConVarChange_Jumper);
@@ -204,12 +201,6 @@ public Action:Command_Melee(client, args)
 		}
 	}
 	
-	if(GetConVarInt(g_hCvarDisabled))
-	{
-		ReplyToCommand(client, "\x04 %T", "Melee_Disabled", LANG_SERVER);	
-		return Plugin_Handled;
-	}
-	
 	// A melee vote is currently taking place
 	if(IsVoteInProgress() && g_bVoting)
 	{
@@ -241,6 +232,11 @@ public Action:Command_Melee(client, args)
 	return Plugin_Handled;
 }
 
+public ConVarChange_Enabled(Handle:convar, const String:oldValue[], const String:newValue[])
+{
+	g_bEnabled = bool:StringToInt(newValue);
+}
+
 public ConVarChange_Healing(Handle:convar, const String:oldValue[], const String:newValue[])
 {
 	g_bHealing = bool:StringToInt(newValue);
@@ -268,8 +264,6 @@ public ConVarChange_Jetpack(Handle:convar, const String:oldValue[], const String
 
 SetMeleeMode(bool:bEnabled, bool:bVerbose=true)
 {
-	if(GetConVarInt(g_hCvarDisabled)) return;
-	
 	if(bEnabled)
 	{
 		g_bEnabled = true;
@@ -451,12 +445,6 @@ public OnAdminMenuReady(Handle:hTopMenu)
 	{
 		iFlags = ReadFlagString(strFlags);
 	}
-	
-	new TopMenuObject:TopMenuVoting = FindTopMenuCategory(g_hTopMenu, ADMINMENU_VOTINGCOMMANDS);
-	if(TopMenuVoting != INVALID_TOPMENUOBJECT)
-	{
-		AddToTopMenu(g_hTopMenu, "votemelee", TopMenuObject_Item, AdminMenu_VoteMelee, TopMenuVoting, "votemelee", iFlags);
-	}
 }
 
 public AdminMenu_Melee(Handle:topmenu, TopMenuAction:action, TopMenuObject:object_id, param, String:buffer[], maxlength)
@@ -471,99 +459,11 @@ public AdminMenu_Melee(Handle:topmenu, TopMenuAction:action, TopMenuObject:objec
 	}
 }
 
-public AdminMenu_VoteMelee(Handle:topmenu, TopMenuAction:action, TopMenuObject:object_id, param, String:buffer[], maxlength)
+public Action:Event_RoundStart(Handle:event, const String:name[], bool:dontBroadcast)
 {
-	if(action == TopMenuAction_DisplayOption)
-	{
-		Format(buffer, maxlength, "Melee vote: %s", g_bEnabled ? g_strOff : g_strOn);
-	}else if(action == TopMenuAction_SelectOption)
-	{
-		Command_VoteMelee(param, 0);
-	}else if(action == TopMenuAction_DrawOption)
-	{
-		buffer[0] = !IsNewVoteAllowed() ? ITEMDRAW_IGNORE : ITEMDRAW_DEFAULT;
-	}
-}
+	g_bEnabled = GetConVarBool(g_hCvarEnabled);
 
-public Action:Command_VoteMelee(client, args)
-{
-	if(client > 0)
-	{
-		decl String:strFlags[10];
-		GetConVarString(g_hCvarFlagsVoting, strFlags, sizeof(strFlags));
-		if(!CheckAdminFlagsByString(client, strFlags))
-		{
-			PrintToChat(client, "\x01[SM] You are not allowed to do that.");
-			return Plugin_Handled;
-		}
-	}
-	
-	if(GetConVarInt(g_hCvarDisabled))
-	{
-		ReplyToCommand(client, "\x04 %T", "Melee_Disabled", LANG_SERVER);
-		return Plugin_Handled;
-	}
-	
-	if(IsVoteInProgress())
-	{
-		ReplyToCommand(client, "\x01[SM] Vote is already in progress.");
-		return Plugin_Handled;
-	}
-	
-	if(!TestVoteDelay(client))
-	{
-		return Plugin_Handled;
-	}
-	
-	g_bVoting = true;
-	g_iVoteResults[0] = 0;
-	g_iVoteResults[1] = 0;
-	ShowActivity(client, "Started vote for melee only.");
-	
-	new Handle:hMenu = CreateMenu(MenuHandler_VoteMelee);
-	
-	SetMenuTitle(hMenu, "%T", "Vote_Title", LANG_SERVER, g_bEnabled ? g_strOff : g_strOn);
-	
-	decl String:strTemp[25];
-	Format(strTemp, sizeof(strTemp), "%T", "Yes", LANG_SERVER);
-	AddMenuItem(hMenu, "", strTemp);
-	Format(strTemp, sizeof(strTemp), "%T", "No", LANG_SERVER);
-	AddMenuItem(hMenu, "", strTemp);
-	
-	SetMenuExitButton(hMenu, false);
-	VoteMenuToAll(hMenu, 20);	
-	
-	return Plugin_Handled;
-}
-
-public MenuHandler_VoteMelee(Handle:menu, MenuAction:action, client, menu_item)
-{
-	if(action == MenuAction_Select && !GetConVarInt(g_hCvarHint))
-	{
-		g_iVoteResults[menu_item]++;
-		PrintHintTextToAll("%T", "Vote_Results", LANG_SERVER, g_iVoteResults[0], g_iVoteResults[1]);
-	}else if(action == MenuAction_VoteEnd)
-	{
-		g_bVoting = false;
-		if(client == 0)
-		{
-			PrintToChatAll("\x04 %T", "Vote_Success", LANG_SERVER);
-			Command_Melee(0, 0);
-		}else{
-			PrintToChatAll("\x04 %T", "Vote_Failed", LANG_SERVER);
-		}
-	}else if(action == MenuAction_VoteCancel)
-	{
-		g_bVoting = false;
-	}else if(action == MenuAction_End)
-	{
-		CloseHandle(menu);
-	}
-}
-
-public Action:Event_ArenaRoundStart(Handle:event, const String:name[], bool:dontBroadcast)
-{
-	if(!g_bEnabled && !GetConVarInt(g_hCvarDisabled) && GetConVarFloat(g_hCvarArena) > GetRandomFloat())
+	if(g_bEnabled)
 	{
 		g_bRandomRound = true;
 		SetMeleeMode(true, false);
@@ -577,7 +477,7 @@ public Action:Event_ArenaRoundStart(Handle:event, const String:name[], bool:dont
 	return Plugin_Continue;
 }
 
-public Action:Event_ArenaRoundEnd(Handle:event, const String:name[], bool:dontBroadcast)
+public Action:Event_RoundEnd(Handle:event, const String:name[], bool:dontBroadcast)
 {
 	if(g_bEnabled && g_bRandomRound)
 	{
@@ -599,25 +499,6 @@ public Native_SetMeleeMode(Handle:plugin, numParams)
 public Native_GetMeleeMode(Handle:plugin, numParams)
 {
 	return _:g_bEnabled;
-}
-
-bool:TestVoteDelay(client)
-{
-	new delay = CheckVoteDelay();
-	
-	if(delay > 0)
-	{
-		if(delay > 60)
-		{
-			ReplyToCommand(client, "[SM] %t", "Vote Delay Minutes", delay % 60);
-		}else{
-			ReplyToCommand(client, "[SM] %t", "Vote Delay Seconds", delay);
-		}
-		
-		return false;
-	}
-	
-	return true;
 }
 
 SDK_ResetWeapon(weapon)
